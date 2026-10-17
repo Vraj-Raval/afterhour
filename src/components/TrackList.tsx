@@ -1,47 +1,21 @@
 import { FavoriteButton } from "./FavoriteButton";
-import { memo, useState } from "react";
+import { PlayerIcon } from "./PlayerIcon";
+import { memo, useState, type ReactNode } from "react";
 import type { MusicTrack } from "../library/types";
 import { AlbumArtwork } from "./AlbumArtwork";
-
-const PAGE_SIZE = 50;
-function formatDuration(seconds: number | null) {
-  if (seconds === null) return "—";
-  return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds) % 60).padStart(2, "0")}`;
-}
-
-type TrackListProps = { onToggleFavorite: (track: MusicTrack) => Promise<void>; favoritesDisabled: boolean; tracks: readonly MusicTrack[]; onPlay: (id: string) => Promise<void>; currentTrackId: string | null; isBusy: boolean };
-
-export const TrackList = memo(function TrackList({ tracks, onPlay, currentTrackId, isBusy, onToggleFavorite, favoritesDisabled }: TrackListProps) {
-  const [page, setPage] = useState(0);
-  const pageCount = Math.ceil(tracks.length / PAGE_SIZE);
-  const currentPage = Math.min(page, Math.max(0, pageCount - 1));
-  const visibleTracks = tracks.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
-
-  if (!tracks.length) return <p className="empty-results">No tracks match your search. Try another title or artist.</p>;
-
-  return <>
-    <div className="track-table-wrap" tabIndex={0} role="region" aria-label="Library tracks, scroll horizontally for all columns">
-      <table className="track-table">
-        <caption className="sr-only">Scanned local music. Activate a track title to play it.</caption>
-        <colgroup><col className="number-column" /><col className="title-column" /><col className="artist-column" /><col className="album-column" /><col className="favorite-column" /><col className="duration-column" /></colgroup>
-        <thead><tr><th scope="col"><span aria-hidden="true">#</span><span className="sr-only">Track number</span></th><th scope="col">Title</th><th scope="col">Artist</th><th scope="col">Album</th><th scope="col"><span className="sr-only">Favorite</span></th><th scope="col" className="track-duration">Duration</th></tr></thead>
-        <tbody>{visibleTracks.map((track) => <tr key={track.id} className={currentTrackId === track.id ? "is-selected" : undefined} onClick={() => { if (track.available && !isBusy) void onPlay(track.id); }}>
-          <td className="track-number">{track.trackNumber ?? "—"}</td>
-          <th scope="row"><div className="scanned-track-title"><AlbumArtwork artwork={track.artwork} compact /><div className="scanned-track-metadata">
-            <button type="button" className="track-select" aria-current={currentTrackId === track.id ? "true" : undefined} disabled={!track.available || isBusy} aria-label={`Play ${track.title} by ${track.artist}`} title={`${track.title}\n${track.path}`} onClick={(event) => { event.stopPropagation(); void onPlay(track.id); }}><span className="truncate">{track.title}</span></button>
-            <span className={`track-file-detail truncate${track.available ? "" : " track-unavailable"}`} title={track.path}>{[!track.available ? "Unavailable" : null, track.format, track.year, track.discNumber ? `Disc ${track.discNumber}` : null].filter(Boolean).join(" / ")}</span>
-          </div></div></th>
-          <td><span className="truncate" title={track.artist}>{track.artist}</span></td>
-          <td><span className="truncate" title={`${track.album}${track.albumArtist ? ` / Album artist: ${track.albumArtist}` : ""}`}>{track.album}</span></td>
-          <td><FavoriteButton track={track} disabled={favoritesDisabled} onToggle={onToggleFavorite} /></td>
-          <td className="track-duration">{formatDuration(track.durationSeconds)}</td>
-        </tr>)}</tbody>
-      </table>
-    </div>
-    <div className="track-pagination" aria-label="Track pages">
-      <button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Previous</button>
-      <span role="status">Page {currentPage + 1} of {pageCount}</span>
-      <button type="button" disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>Next</button>
-    </div>
-  </>;
+const PAGE_SIZE=50;
+function formatDuration(seconds:number|null) { return seconds===null || !Number.isFinite(seconds)?"--:--":`${Math.floor(seconds/60)}:${String(Math.floor(seconds)%60).padStart(2,"0")}`; }
+type Props={playbackStatus?:string;onQueue?:(id:string,playNext?:boolean)=>Promise<void>;renderActions?:(track:MusicTrack)=>ReactNode;onToggleFavorite:(track:MusicTrack)=>Promise<void>;favoritesDisabled:boolean;tracks:readonly MusicTrack[];onPlay:(id:string)=>Promise<void>;currentTrackId:string|null;isBusy:boolean};
+export const TrackList=memo(function TrackList({tracks,onPlay,currentTrackId,isBusy,onToggleFavorite,favoritesDisabled,renderActions,onQueue,playbackStatus}:Props){
+  const [page,setPage]=useState(0);const pageCount=Math.ceil(tracks.length/PAGE_SIZE);const currentPage=Math.min(page,Math.max(0,pageCount-1));const visibleTracks=tracks.slice(currentPage*PAGE_SIZE,(currentPage+1)*PAGE_SIZE);
+  if(!tracks.length)return <div className="empty-results"><h3>No songs found</h3><p>Try a different title, artist, or album.</p></div>;
+  return <><div className="track-table-wrap" role="region" aria-label="Tracks"><table className="track-table"><caption className="sr-only">Local music. Select a song to play.</caption>
+    <colgroup><col className="number-column" /><col className="title-column" /><col className="album-column" /><col className="favorite-column" /><col className="duration-column" />{(renderActions||onQueue)&&<col className="actions-column" />}</colgroup>
+    <thead><tr><th scope="col">#</th><th scope="col">Title</th><th scope="col" className="album-cell">Album</th><th scope="col"><span className="sr-only">Favorite</span></th><th scope="col" className="track-duration">Time</th>{(renderActions||onQueue)&&<th scope="col"><span className="sr-only">Actions</span></th>}</tr></thead>
+    <tbody>{visibleTracks.map((track,index)=><tr key={track.id} className={`${currentTrackId===track.id?"is-selected ":""}${currentTrackId===track.id && playbackStatus==="playing"?"is-playing ":""}${!track.available?"is-unavailable":""}`} onClick={()=>{if(track.available&&!isBusy)void onPlay(track.id);}}>
+      <td className="track-number">{currentTrackId===track.id && playbackStatus==="playing"?<span title="Playing" aria-label="Playing"><PlayerIcon name="volume" /></span>:currentPage*PAGE_SIZE+index+1}</td>
+      <th scope="row"><div className="scanned-track-title"><AlbumArtwork artwork={track.artwork} compact /><div className="scanned-track-metadata"><button type="button" className="track-select" aria-current={currentTrackId===track.id?"true":undefined} disabled={!track.available||isBusy} aria-label={`Play ${track.title} by ${track.artist}`} title={`${track.title} / ${track.path}`} onClick={event=>{event.stopPropagation();void onPlay(track.id);}}><span className="truncate">{track.title}</span></button><span className="track-artist truncate" title={track.artist}>{track.artist}{!track.available && <span className="track-unavailable"> / Unavailable</span>}</span></div></div></th>
+      <td className="album-cell"><span className="truncate" title={track.album}>{track.album}</span></td><td><FavoriteButton track={track} disabled={favoritesDisabled} onToggle={onToggleFavorite} /></td><td className="track-duration">{formatDuration(track.durationSeconds)}</td>
+      {(renderActions||onQueue)&&<td className="track-action-cell" onClick={event=>event.stopPropagation()}><details className="track-actions"><summary aria-label={`Actions for ${track.title}`} title={`Actions for ${track.title}`}><PlayerIcon name="more" /></summary><div className="track-menu" onClickCapture={event=>{if((event.target as HTMLElement).closest("button")){const details=event.currentTarget.closest("details");if(details)details.open=false;}}}>{renderActions?.(track)}{onQueue&&<><button type="button" className="track-playlist-action" disabled={isBusy||!track.available} aria-label={`Play ${track.title} next`} onClick={event=>{event.stopPropagation();void onQueue(track.id,true);}}>Play next</button><button type="button" className="track-playlist-action" disabled={isBusy||!track.available} aria-label={`Add ${track.title} to queue`} onClick={event=>{event.stopPropagation();void onQueue(track.id);}}>Add to queue</button></>}</div></details></td>}
+    </tr>)}</tbody></table></div><div className="track-pagination" aria-label="Track pages"><span>{tracks.length} songs</span><div><button type="button" disabled={currentPage===0} onClick={()=>setPage(currentPage-1)}>Previous</button><span role="status">{currentPage+1} / {pageCount}</span><button type="button" disabled={currentPage+1>=pageCount} onClick={()=>setPage(currentPage+1)}>Next</button></div></div></>;
 });

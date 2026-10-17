@@ -1,6 +1,9 @@
 use crate::library::{MusicTrack, PlaybackPreferences};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+#[path = "queue.rs"]
+mod queue;
+pub use queue::QueueEntry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,6 +17,8 @@ pub enum Status {
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackSnapshot {
     pub revision: u64,
+    pub queue_revision: u64,
+    pub queue: Vec<QueueEntry>,
     pub volume: f64,
     pub muted: bool,
     pub preferences_error: Option<String>,
@@ -33,8 +38,33 @@ pub struct PlaybackSnapshot {
     rename_all_fields = "camelCase"
 )]
 pub enum Action {
+    Enqueue {
+        track_id: String,
+        play_next: bool,
+    },
+    QueueRemove {
+        entry_id: u64,
+        queue_revision: u64,
+    },
+    QueueMove {
+        entry_id: u64,
+        direction: i8,
+        queue_revision: u64,
+    },
+    QueueClear {
+        queue_revision: u64,
+    },
     Play {
         track_id: String,
+    },
+    PlaySelection {
+        track_id: String,
+        track_ids: Vec<String>,
+    },
+    PlayPlaylist {
+        track_id: String,
+        playlist_id: String,
+        track_ids: Vec<String>,
     },
     PlayCollection {
         track_id: String,
@@ -89,7 +119,11 @@ pub trait Backend {
 
 pub struct Transport<B: Backend> {
     pub backend: B,
+    queue_playback: queue::QueuePlayback,
+    next_queue_id: u64,
     liked_collection: bool,
+    playlist_id: Option<String>,
+    selection_ids: Option<Vec<String>>,
     pub state: PlaybackSnapshot,
 }
 
@@ -98,9 +132,15 @@ impl<B: Backend> Transport<B> {
         backend.set_volume(1.0);
         Self {
             backend,
+            queue_playback: queue::QueuePlayback::default(),
+            next_queue_id: 0,
             liked_collection: false,
+            playlist_id: None,
+            selection_ids: None,
             state: PlaybackSnapshot {
                 revision: 0,
+                queue_revision: 0,
+                queue: Vec::new(),
                 volume: 1.0,
                 muted: false,
                 preferences_error: None,
@@ -113,6 +153,10 @@ impl<B: Backend> Transport<B> {
                 error: None,
             },
         }
+    }
+
+    pub fn playlist_id(&self) -> Option<&str> {
+        self.playlist_id.as_deref()
     }
 
     pub fn is_liked_collection(&self) -> bool {
@@ -205,24 +249,83 @@ impl<B: Backend> Transport<B> {
         Ok(())
     }
 
+    fn collection_neighbor(
+        &self,
+        id: &str,
+        previous: bool,
+        neighbor: &mut impl FnMut(&str, bool) -> Result<Option<String>, String>,
+    ) -> Result<Option<String>, String> {
+        if let Some(ids) = &self.selection_ids {
+            let index = ids
+                .iter()
+                .position(|candidate| candidate == id)
+                .ok_or("The current song is no longer in this playback selection.")?;
+            Ok(if previous {
+                index.checked_sub(1).and_then(|i| ids.get(i)).cloned()
+            } else {
+                ids.get(index + 1).cloned()
+            })
+        } else {
+            neighbor(id, previous)
+        }
+    }
+
     fn navigate(
         &mut self,
         previous: bool,
         resolve: &mut impl FnMut(&str) -> Result<(MusicTrack, File), String>,
         neighbor: &mut impl FnMut(&str, bool) -> Result<Option<String>, String>,
     ) -> Result<(), String> {
-        let current = self
-            .state
-            .track
-            .as_ref()
-            .ok_or("Select a library track first.")?
-            .id
-            .clone();
-        let target = if previous && self.state.position_seconds > 3.0 {
-            Some(current.clone())
-        } else {
-            neighbor(&current, previous)?.or_else(|| previous.then(|| current.clone()))
-        };
+        let current = self.state.track.as_ref().map(|track| track.id.clone());
+        if !previous {
+            if let Some(entry) = self.state.queue.first().cloned() {
+                let (track, file) = resolve(&entry.track.id)?;
+                self.start_track(track, file)?;
+                if !self.queue_playback.active {
+                    self.queue_playback.active = true;
+                    self.queue_playback.anchor = current.clone();
+                    self.queue_playback.history.clear();
+                }
+                if let Some(current) = current {
+                    self.queue_playback.history.push(current);
+                }
+                self.state.queue.remove(0);
+                self.state.queue_revision += 1;
+                return Ok(());
+            }
+        }
+        let current = current.ok_or("Select a library track or add a song to Up Next first.")?;
+        if previous && self.state.position_seconds <= 3.0 && self.queue_playback.active {
+            if let Some(target) = self.queue_playback.history.last().cloned() {
+                let returning = self.state.track.clone().ok_or("No current track.")?;
+                let (track, file) = resolve(&target)?;
+                self.start_track(track, file)?;
+                self.queue_playback.history.pop();
+                self.push_queue(returning, true);
+                if self.queue_playback.history.is_empty()
+                    && self.queue_playback.anchor.as_deref() == Some(&target)
+                {
+                    self.queue_playback = queue::QueuePlayback::default();
+                }
+                return Ok(());
+            }
+        }
+        let target =
+            if previous && (self.state.position_seconds > 3.0 || self.queue_playback.active) {
+                Some(current.clone())
+            } else {
+                let anchor = if self.queue_playback.active {
+                    self.queue_playback.anchor.as_deref()
+                } else {
+                    Some(current.as_str())
+                };
+                match anchor {
+                    Some(anchor) => self
+                        .collection_neighbor(anchor, previous, neighbor)?
+                        .or_else(|| previous.then(|| current.clone())),
+                    None => None,
+                }
+            };
         if let Some(target) = target {
             if previous
                 && target == current
@@ -233,7 +336,6 @@ impl<B: Backend> Transport<B> {
                     self.state.can_seek = false;
                     return Err(error);
                 }
-                // Invalidate repeated clicks captured before this restart, without replacing audio.
                 self.state.source_id += 1;
                 self.state.position_seconds = 0.0;
                 return Ok(());
@@ -251,6 +353,9 @@ impl<B: Backend> Transport<B> {
             self.state.status = Status::Stopped;
             self.state.position_seconds = 0.0;
             self.state.can_seek = false;
+        }
+        if !previous && self.queue_playback.anchor.is_some() {
+            self.queue_playback = queue::QueuePlayback::default();
         }
         Ok(())
     }
@@ -288,7 +393,16 @@ impl<B: Backend> Transport<B> {
     ) -> PlaybackSnapshot {
         let preference_action =
             matches!(action, Action::SetVolume { .. } | Action::SetMuted { .. });
-        if matches!(action, Action::Status) || preference_action {
+        let queue_action = matches!(
+            action,
+            Action::Enqueue { .. }
+                | Action::QueueRemove { .. }
+                | Action::QueueMove { .. }
+                | Action::QueueClear { .. }
+        );
+        if queue_action {
+            // Edit first, then process completion; never discard a completion event.
+        } else if matches!(action, Action::Status) || preference_action {
             self.tick(&mut resolve, &mut neighbor);
         } else {
             self.poll();
@@ -299,6 +413,44 @@ impl<B: Backend> Transport<B> {
         }
         let seeking = matches!(action, Action::Seek { .. } | Action::Previous { .. });
         let result = match action {
+            Action::Enqueue {
+                track_id,
+                play_next,
+            } => resolve(&track_id).map(|(track, _file)| self.push_queue(track, play_next)),
+            Action::QueueRemove {
+                entry_id,
+                queue_revision,
+            } => self.edit_queue(queue_revision, |queue| {
+                let index = queue
+                    .iter()
+                    .position(|entry| entry.id == entry_id)
+                    .ok_or("This queued song has already changed.")?;
+                queue.remove(index);
+                Ok(())
+            }),
+            Action::QueueMove {
+                entry_id,
+                direction,
+                queue_revision,
+            } => self.edit_queue(queue_revision, |queue| {
+                if direction != -1 && direction != 1 {
+                    return Err("Invalid queue move.".into());
+                }
+                let index = queue
+                    .iter()
+                    .position(|entry| entry.id == entry_id)
+                    .ok_or("This queued song has already changed.")?;
+                let target = index as isize + direction as isize;
+                if target < 0 || target as usize >= queue.len() {
+                    return Err("This song is already at the queue boundary.".into());
+                }
+                queue.swap(index, target as usize);
+                Ok(())
+            }),
+            Action::QueueClear { queue_revision } => self.edit_queue(queue_revision, |queue| {
+                queue.clear();
+                Ok(())
+            }),
             Action::Play { track_id } => {
                 let replaying = self
                     .state
@@ -310,8 +462,46 @@ impl<B: Backend> Transport<B> {
                     .map(|()| {
                         if !replaying {
                             self.liked_collection = false;
+                            self.playlist_id = None;
+                            self.selection_ids = None;
+                            self.queue_playback = queue::QueuePlayback::default();
                         }
                     })
+            }
+            Action::PlaySelection {
+                track_id,
+                track_ids,
+            } => {
+                if !track_ids.contains(&track_id) {
+                    Err("The selected song is no longer in this selection.".into())
+                } else {
+                    resolve(&track_id)
+                        .and_then(|(track, file)| self.start_track(track, file))
+                        .map(|()| {
+                            self.selection_ids = Some(track_ids);
+                            self.playlist_id = None;
+                            self.liked_collection = false;
+                            self.queue_playback = queue::QueuePlayback::default();
+                        })
+                }
+            }
+            Action::PlayPlaylist {
+                track_id,
+                playlist_id,
+                track_ids,
+            } => {
+                if !track_ids.contains(&track_id) {
+                    Err("The selected track is no longer in this playlist.".into())
+                } else {
+                    resolve(&track_id)
+                        .and_then(|(track, file)| self.start_track(track, file))
+                        .map(|()| {
+                            self.liked_collection = false;
+                            self.playlist_id = Some(playlist_id);
+                            self.selection_ids = None;
+                            self.queue_playback = queue::QueuePlayback::default();
+                        })
+                }
             }
             Action::PlayCollection {
                 track_id,
@@ -330,6 +520,9 @@ impl<B: Backend> Transport<B> {
                         .and_then(|(track, file)| self.start_track(track, file))
                         .map(|()| {
                             self.liked_collection = liked;
+                            self.playlist_id = None;
+                            self.selection_ids = None;
+                            self.queue_playback = queue::QueuePlayback::default();
                         })
                 }
             }
@@ -408,6 +601,9 @@ impl<B: Backend> Transport<B> {
         }
         if !preference_action || result.is_err() {
             self.state.error = result.err();
+        }
+        if queue_action {
+            self.tick(&mut resolve, &mut neighbor);
         }
         self.state.revision += 1;
         self.state.clone()

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { PlaybackAction, PlaybackSnapshot, PlaybackCollection } from "../playback/types";
 
-const idle: PlaybackSnapshot = { revision: 0, volume: 1, muted: false, preferencesError: null, sourceId: 0, positionSeconds: 0, durationSeconds: null, canSeek: false, status: "stopped", track: null, error: null };
+const idle: PlaybackSnapshot = { revision: 0, queue: [], queueRevision: 0, volume: 1, muted: false, preferencesError: null, sourceId: 0, positionSeconds: 0, durationSeconds: null, canSeek: false, status: "stopped", track: null, error: null };
 
 export function usePlayback() {
   const [snapshot, setSnapshot] = useState<PlaybackSnapshot>(idle);
@@ -90,7 +90,7 @@ export function usePlayback() {
     setIsVolumeBusy(true); scheduleVolume();
   }
 
-  const playTrack = useCallback((trackId: string, collection?: PlaybackCollection) => control(collection ? { type: "playCollection", trackId, ...collection } : { type: "play", trackId }), [control]);
+  const playTrack = useCallback((trackId: string, collection?: PlaybackCollection) => control(collection?.selection ? { type: "playSelection", trackId, trackIds: collection.trackIds } : collection?.playlistId ? { type: "playPlaylist", trackId, playlistId: collection.playlistId, trackIds: collection.trackIds } : collection ? { type: "playCollection", trackId, ...collection } : { type: "play", trackId }), [control]);
 
   function togglePlayback() {
     if (snapshot.status === "playing") return control({ type: "pause" });
@@ -101,6 +101,10 @@ export function usePlayback() {
 
   return { ...snapshot, error: requestError || snapshot.error, isBusy, isReady,
     playTrack, togglePlayback, setVolume, setMuted, isVolumeBusy,
+    enqueue: (trackId: string, playNext = false) => control({ type: "enqueue", trackId, playNext }),
+    removeQueued: (entryId: number) => control({ type: "queueRemove", entryId, queueRevision: snapshot.queueRevision }),
+    moveQueued: (entryId: number, direction: -1 | 1) => control({ type: "queueMove", entryId, direction, queueRevision: snapshot.queueRevision }),
+    clearQueue: () => control({ type: "queueClear", queueRevision: snapshot.queueRevision }),
     seek: (seconds: number, sourceId: number) => control({ type: "seek", seconds, sourceId }),
     nextTrack: () => control({ type: "next", sourceId: snapshot.sourceId }),
     previousTrack: () => control({ type: "previous", sourceId: snapshot.sourceId }),

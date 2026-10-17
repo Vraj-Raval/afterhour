@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import type { usePlayback } from "../hooks/usePlayback";
 import { clampPosition, formatPlaybackTime } from "../playback/time";
 
@@ -13,7 +13,7 @@ export function PlaybackProgress({ playback }: { playback: ReturnType<typeof use
   }
   return <div className="timeline">
     <span>{playback.track ? formatPlaybackTime(playback.positionSeconds) : "--:--"}</span>
-    <input className="player-range" type="range" min={0} max={duration ?? 1} step="any"
+    <input className="player-range" style={{ "--range-fill": `${duration ? ((draft ?? position)/duration)*100 : 0}%` } as CSSProperties} type="range" min={0} max={duration ?? 1} step="any"
       value={draft ?? position} disabled={disabled} aria-label="Playback position"
       aria-valuetext={`${formatPlaybackTime(draft ?? position)} of ${formatPlaybackTime(duration)}`}
       onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)}

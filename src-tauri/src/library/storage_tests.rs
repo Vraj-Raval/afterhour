@@ -392,7 +392,7 @@ fn version_one_migrates_preferences_without_losing_library_and_reopens_safely() 
     db.save_folder(&root).unwrap();
     save(&mut db, &[root], &[track(&path, "Preserved")], true);
     db.connection
-        .execute_batch("ALTER TABLE tracks DROP COLUMN favorite; DROP TABLE playback_preferences; PRAGMA user_version=1;")
+        .execute_batch("DROP TABLE playlist_tracks; DROP TABLE playlists; ALTER TABLE tracks DROP COLUMN favorite; DROP TABLE playback_preferences; PRAGMA user_version=1;")
         .unwrap();
     drop(db);
     let mut db = Database::open(&location).unwrap();
@@ -414,7 +414,7 @@ fn version_one_migrates_preferences_without_losing_library_and_reopens_safely() 
         db.connection
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
 }
 
@@ -483,7 +483,7 @@ fn version_two_migrates_favorites_without_losing_data() {
     db.save_folder(&root).unwrap();
     save(&mut db, &[root], &[track(&path, "Preserved")], true);
     db.connection
-        .execute_batch("ALTER TABLE tracks DROP COLUMN favorite; PRAGMA user_version=2;")
+        .execute_batch("DROP TABLE playlist_tracks; DROP TABLE playlists; ALTER TABLE tracks DROP COLUMN favorite; PRAGMA user_version=2;")
         .unwrap();
     drop(db);
     let db = Database::open(&location).unwrap();
@@ -500,7 +500,7 @@ fn version_two_migrates_favorites_without_losing_data() {
         db.connection
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
 }
 
@@ -565,4 +565,277 @@ fn liked_navigation_uses_live_membership_and_removed_current_track_as_anchor() {
     db.set_favorite(&ids[1], false).unwrap();
     db.set_favorite(&ids[2], false).unwrap();
     assert_eq!(db.liked_playback_neighbor(&ids[0], false).unwrap(), None);
+}
+
+#[test]
+fn playlists_validate_names_and_support_rename_delete_and_restart() {
+    use super::PlaylistAction::*;
+    let (_f, location, mut db) = setup();
+    assert!(db.playlists().unwrap().is_empty());
+    for name in ["", "  ", "\t\n", "\u{2003}"] {
+        assert!(db.playlist_control(Create { name: name.into() }).is_err());
+    }
+    let created = db
+        .playlist_control(Create {
+            name: "  After Midnight  ".into(),
+        })
+        .unwrap();
+    let id = created[0].id.clone();
+    assert_eq!(created[0].name, "After Midnight");
+    assert_eq!(id.len(), 32);
+    assert!(created[0].created_at > 0);
+    assert!(
+        db.playlist_control(Rename {
+            playlist_id: id.clone(),
+            name: " ".into()
+        })
+        .is_err()
+    );
+    db.playlist_control(Rename {
+        playlist_id: id.clone(),
+        name: "  Night Drive  ".into(),
+    })
+    .unwrap();
+    drop(db);
+    let mut db = Database::open(&location).unwrap();
+    let restored = db.playlists().unwrap();
+    assert_eq!(restored[0].id, id);
+    assert_eq!(restored[0].name, "Night Drive");
+    db.playlist_control(Delete {
+        playlist_id: id.clone(),
+    })
+    .unwrap();
+    assert!(db.playlists().unwrap().is_empty());
+    assert!(
+        db.playlist_control(Rename {
+            playlist_id: id,
+            name: "Gone".into()
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn playlist_membership_preserves_add_order_uniqueness_and_library_favorites() {
+    use super::PlaylistAction::*;
+    let (f, location, mut db) = setup();
+    let paths = [
+        f.file("music/a.flac", b"fixture"),
+        f.file("music/b.flac", b"fixture"),
+        f.file("music/c.flac", b"fixture"),
+    ];
+    let root = fs::canonicalize(paths[0].parent().unwrap()).unwrap();
+    db.save_folder(&root).unwrap();
+    save(
+        &mut db,
+        &[root],
+        &paths.iter().map(|p| track(p, "Song")).collect::<Vec<_>>(),
+        true,
+    );
+    let ids: Vec<_> = db
+        .snapshot()
+        .unwrap()
+        .tracks
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    db.set_favorite(&ids[0], true).unwrap();
+    let id = db
+        .playlist_control(Create {
+            name: "Ordered".into(),
+        })
+        .unwrap()[0]
+        .id
+        .clone();
+    for i in [2, 0, 1, 2] {
+        db.playlist_control(Add {
+            playlist_id: id.clone(),
+            track_id: ids[i].clone(),
+        })
+        .unwrap();
+    }
+    assert_eq!(
+        db.playlists().unwrap()[0].track_ids,
+        vec![ids[2].clone(), ids[0].clone(), ids[1].clone()]
+    );
+    assert!(
+        db.playlist_control(Add {
+            playlist_id: id.clone(),
+            track_id: "not-saved".into()
+        })
+        .is_err()
+    );
+    assert!(
+        db.playlist_control(Add {
+            playlist_id: "not-saved".into(),
+            track_id: ids[0].clone()
+        })
+        .is_err()
+    );
+    drop(db);
+    let mut db = Database::open(&location).unwrap();
+    assert_eq!(
+        db.playlists().unwrap()[0].track_ids,
+        vec![ids[2].clone(), ids[0].clone(), ids[1].clone()]
+    );
+    assert!(db.playlist_contains(&id, &ids[0]).unwrap());
+    db.playlist_control(Remove {
+        playlist_id: id.clone(),
+        track_id: ids[0].clone(),
+    })
+    .unwrap();
+    db.playlist_control(Remove {
+        playlist_id: id.clone(),
+        track_id: ids[0].clone(),
+    })
+    .unwrap();
+    assert_eq!(
+        db.playlists().unwrap()[0].track_ids,
+        vec![ids[2].clone(), ids[1].clone()]
+    );
+    assert!(!db.playlist_contains(&id, &ids[0]).unwrap());
+    drop(db);
+    let mut db = Database::open(&location).unwrap();
+    assert_eq!(
+        db.playlists().unwrap()[0].track_ids,
+        vec![ids[2].clone(), ids[1].clone()]
+    );
+    assert_eq!(
+        db.playlist_playback_neighbor(&id, &ids[0], false).unwrap(),
+        Some(ids[1].clone())
+    );
+    assert_eq!(
+        db.playlist_playback_neighbor(&id, &ids[0], true).unwrap(),
+        Some(ids[2].clone())
+    );
+    assert_eq!(
+        db.playlist_playback_neighbor(&id, &ids[2], true).unwrap(),
+        None
+    );
+    assert_eq!(
+        db.playlist_playback_neighbor(&id, &ids[1], false).unwrap(),
+        None
+    );
+    db.playlist_control(Add {
+        playlist_id: id.clone(),
+        track_id: ids[0].clone(),
+    })
+    .unwrap();
+    assert_eq!(
+        db.playlists().unwrap()[0].track_ids,
+        vec![ids[2].clone(), ids[1].clone(), ids[0].clone()]
+    );
+    fs::remove_file(&paths[1]).unwrap();
+    assert_eq!(db.playlists().unwrap()[0].track_ids.len(), 3);
+    assert!(!db.snapshot().unwrap().tracks[1].available);
+    db.playlist_control(Delete {
+        playlist_id: id.clone(),
+    })
+    .unwrap();
+    let snapshot = db.snapshot().unwrap();
+    assert_eq!(snapshot.tracks.len(), 3);
+    assert!(snapshot.tracks[0].favorite);
+    assert!(paths[0].exists());
+    assert_eq!(
+        db.playlist_playback_neighbor(&id, &ids[0], false).unwrap(),
+        None
+    );
+    assert_eq!(
+        db.connection
+            .query_row("SELECT count(*) FROM playlist_tracks", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn version_three_migrates_playlists_preserving_existing_data() {
+    let (f, location, mut db) = setup();
+    let path = f.file("music/keep.flac", b"fixture");
+    let root = fs::canonicalize(path.parent().unwrap()).unwrap();
+    db.save_folder(&root).unwrap();
+    save(&mut db, &[root], &[track(&path, "Preserved")], true);
+    let id = db.snapshot().unwrap().tracks[0].id.clone();
+    db.set_favorite(&id, true).unwrap();
+    db.connection
+        .execute_batch("DROP TABLE playlist_tracks; DROP TABLE playlists; PRAGMA user_version=3;")
+        .unwrap();
+    drop(db);
+    let db = Database::open(&location).unwrap();
+    let snapshot = db.snapshot().unwrap();
+    assert_eq!(snapshot.tracks.len(), 1);
+    assert_eq!(snapshot.folders.len(), 1);
+    assert_eq!(snapshot.tracks[0].title, "Preserved");
+    assert!(snapshot.tracks[0].favorite);
+    assert!(db.playlists().unwrap().is_empty());
+    assert_eq!(
+        db.connection
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
+fn failed_playlist_migration_is_transactional() {
+    let (_f, location, db) = setup();
+    db.connection.execute_batch("DROP TABLE playlist_tracks; DROP TABLE playlists; CREATE TABLE playlist_tracks(keep TEXT); INSERT INTO playlist_tracks VALUES('preserved'); PRAGMA user_version=3;").unwrap();
+    drop(db);
+    assert!(Database::open(&location).is_err());
+    let connection = rusqlite::Connection::open(location).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT keep FROM playlist_tracks", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "preserved"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='playlists'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn playlist_write_failures_preserve_confirmed_metadata() {
+    use super::PlaylistAction::*;
+    let (_f, _, mut db) = setup();
+    let id = db
+        .playlist_control(Create {
+            name: "Saved".into(),
+        })
+        .unwrap()[0]
+        .id
+        .clone();
+    db.connection
+        .execute_batch("PRAGMA query_only=ON;")
+        .unwrap();
+    assert!(
+        db.playlist_control(Rename {
+            playlist_id: id.clone(),
+            name: "Rejected".into()
+        })
+        .is_err()
+    );
+    assert!(db.playlist_control(Delete { playlist_id: id }).is_err());
+    assert_eq!(db.playlists().unwrap()[0].name, "Saved");
+    let action: super::PlaylistAction =
+        serde_json::from_str(r#"{"type":"add","playlistId":"playlist","trackId":"track"}"#)
+            .unwrap();
+    assert!(
+        matches!(action, Add {playlist_id,track_id} if playlist_id=="playlist" && track_id=="track")
+    );
 }

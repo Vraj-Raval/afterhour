@@ -13,7 +13,11 @@ use std::{
     time::Duration,
 };
 
-const SCHEMA_VERSION: i64 = 3;
+#[path = "playlists.rs"]
+mod playlists;
+pub use playlists::{Playlist, PlaylistAction};
+
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlaybackPreferences {
@@ -126,6 +130,29 @@ impl Database {
         if version < 3 {
             let transaction = connection.transaction().map_err(db_error)?;
             transaction.execute_batch("ALTER TABLE tracks ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)); PRAGMA user_version=3;").map_err(db_error)?;
+            transaction.commit().map_err(db_error)?;
+        }
+        if version < 4 {
+            let transaction = connection.transaction().map_err(db_error)?;
+            transaction
+                .execute_batch(
+                    "CREATE TABLE playlists (
+                id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+                name TEXT NOT NULL CHECK(length(trim(name))>0),
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE playlist_tracks (
+                playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+                track_key TEXT NOT NULL REFERENCES tracks(path_key) ON DELETE CASCADE,
+                position INTEGER NOT NULL CHECK(position>=0),
+                removed INTEGER NOT NULL DEFAULT 0 CHECK(removed IN (0,1)),
+                PRIMARY KEY(playlist_id,track_key),
+                UNIQUE(playlist_id,position)
+            );
+            PRAGMA user_version=4;",
+                )
+                .map_err(db_error)?;
             transaction.commit().map_err(db_error)?;
         }
         // Do not recreate or replace existing databases. SQLite manages its own journal.

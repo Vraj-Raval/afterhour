@@ -27,7 +27,7 @@ function workflow(invoke) {
   };
 }
 const track = { id: "saved-track", title: "Actual library track" };
-const snapshot = (revision = 0, status = "stopped", current = null, error = null) => ({ volume: 1, muted: false, preferencesError: null, revision, status, track: current, error, sourceId: current ? 1 : 0, positionSeconds: 0, durationSeconds: current ? 60 : null, canSeek: !!current });
+const snapshot = (revision = 0, status = "stopped", current = null, error = null) => ({ queue: [], queueRevision: 0, volume: 1, muted: false, preferencesError: null, revision, status, track: current, error, sourceId: current ? 1 : 0, positionSeconds: 0, durationSeconds: current ? 60 : null, canSeek: !!current });
 const flush = () => new Promise(setImmediate);
 
 test("startup only requests status and never auto-plays", async () => {
@@ -281,4 +281,40 @@ test("collection starts send the complete context, and navigation keeps source g
   assert.deepEqual(actions.at(-1), { type: "next", sourceId: 1 });
   await app.render().playTrack(track.id, { liked: false, trackIds: [track.id, "unliked", "second"] });
   assert.equal(actions.at(-1).liked, false);
+});
+
+
+test("playlist starts pass a stable playlist ID and full ordered track IDs", async () => {
+  const actions=[];
+  const app=workflow(action => { actions.push(action); return Promise.resolve(snapshot(actions.length,action.type === "status" ? "stopped" : "playing",action.type === "status" ? null : track)); });
+  app.render(); await flush();
+  await app.render().playTrack(track.id,{liked:false,playlistId:"custom",trackIds:["third",track.id]});
+  assert.deepEqual(actions.at(-1),{type:"playPlaylist",trackId:track.id,playlistId:"custom",trackIds:["third",track.id]});
+  await app.render().nextTrack();
+  assert.deepEqual(actions.at(-1),{type:"next",sourceId:1});
+});
+
+
+test("queue actions are native, use stable entry IDs and revisions, and reject overlapping submissions",async()=>{
+  const actions=[];let complete;
+  const native={...snapshot(1,"playing",track),queueRevision:7,queue:[{id:42,track}]};
+  const app=workflow(action=>{actions.push(action);if(action.type==="status")return Promise.resolve(native);return new Promise(resolve=>{complete=resolve;});});
+  app.render();await flush();const before=app.render();
+  const pending=before.enqueue(track.id,true);await before.enqueue(track.id);await before.nextTrack();
+  assert.deepEqual(actions.at(-1),{type:"enqueue",trackId:track.id,playNext:true});assert.equal(actions.length,2);
+  complete({...native,revision:2,queueRevision:8});await pending;
+  const move=app.render().moveQueued(42,-1);assert.deepEqual(actions.at(-1),{type:"queueMove",entryId:42,direction:-1,queueRevision:8});complete({...native,revision:3,queueRevision:9});await move;
+  const clear=app.render().clearQueue();assert.deepEqual(actions.at(-1),{type:"queueClear",queueRevision:9});complete({...native,revision:4,queueRevision:10,queue:[]});await clear;
+  assert.deepEqual(app.render().queue,[]);assert.equal(app.render().status,"playing");
+});
+
+
+test("search and group playback sends frozen selection IDs and preserves the existing queue",async()=>{
+ const actions=[];const queue=[{id:3,track}];
+ const app=workflow(action=>{actions.push(action);return Promise.resolve({...snapshot(actions.length,"playing",track),queue,queueRevision:1});});
+ app.render();await flush();
+ await app.render().playTrack(track.id,{liked:false,selection:true,trackIds:[track.id,"second"]});
+ assert.deepEqual(actions.at(-1),{type:"playSelection",trackId:track.id,trackIds:[track.id,"second"]});
+ assert.deepEqual(app.render().queue,queue);
+ await app.render().nextTrack();assert.deepEqual(actions.at(-1),{type:"next",sourceId:1});
 });

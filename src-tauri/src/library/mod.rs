@@ -122,11 +122,30 @@ pub(crate) fn playback_track(
         .playback_track(id)
 }
 
+pub(crate) fn playlist_start_track(
+    state: &LibraryState,
+    playlist_id: &str,
+    id: &str,
+) -> Result<(MusicTrack, std::fs::File), String> {
+    let database = state
+        .database
+        .try_lock()
+        .map_err(|_| "The library is busy. Try playing this track again shortly.")?;
+    let database = database
+        .as_ref()
+        .ok_or("The saved library is still loading.")?;
+    if !database.playlist_contains(playlist_id, id)? {
+        return Err("This song is no longer in this playlist. Select another song.".into());
+    }
+    database.playback_track(id)
+}
+
 pub(crate) fn playback_neighbor(
     state: &LibraryState,
     id: &str,
     previous: bool,
     liked: bool,
+    playlist_id: Option<&str>,
 ) -> Result<Option<String>, String> {
     let database = state
         .database
@@ -135,7 +154,9 @@ pub(crate) fn playback_neighbor(
     let database = database
         .as_ref()
         .ok_or("The saved library is still loading.")?;
-    if liked {
+    if let Some(playlist_id) = playlist_id {
+        database.playlist_playback_neighbor(playlist_id, id, previous)
+    } else if liked {
         database.liked_playback_neighbor(id, previous)
     } else {
         database.playback_neighbor(id, previous)
@@ -333,4 +354,18 @@ pub async fn set_track_favorite(
     })
     .await
     .map_err(|e| format!("Cannot save favorite: {e}"))?
+}
+
+#[tauri::command]
+pub async fn playlist_control(
+    app: tauri::AppHandle,
+    action: storage::PlaylistAction,
+    state: State<'_, Arc<LibraryState>>,
+) -> Result<Vec<storage::Playlist>, String> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        with_database(&app, &state, |database| database.playlist_control(action))
+    })
+    .await
+    .map_err(|e| format!("Cannot update playlists: {e}"))?
 }

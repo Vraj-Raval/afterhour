@@ -62,11 +62,19 @@ impl PlaybackManager {
                                     let preference_action = matches!(request.action, Action::SetVolume { .. } | Action::SetMuted { .. });
                                     let before = transport.preferences();
                                     let liked = transport.is_liked_collection();
+                                    let playlist_id = transport.playlist_id().map(str::to_owned);
+                                    let starting_playlist = match &request.action {
+                                        Action::PlayPlaylist { playlist_id, .. } => Some(playlist_id.clone()),
+                                        _ => None,
+                                    };
                                     transport.apply_with_navigation(
                                         request.action,
-                                        |id| library::playback_track(&library, id),
+                                        |id| match starting_playlist.as_deref() {
+                                            Some(playlist) => library::playlist_start_track(&library, playlist, id),
+                                            None => library::playback_track(&library, id),
+                                        },
                                         |id, previous| {
-                                            library::playback_neighbor(&library, id, previous, liked)
+                                            library::playback_neighbor(&library, id, previous, liked, playlist_id.as_deref())
                                         },
                                     );
                                     if preference_action && (before != transport.preferences() || transport.state.preferences_error.is_some()) {
@@ -78,10 +86,11 @@ impl PlaybackManager {
                                 }
                                 Err(mpsc::RecvTimeoutError::Timeout) => {
                                     let liked = transport.is_liked_collection();
+                                    let playlist_id = transport.playlist_id().map(str::to_owned);
                                     transport.tick(
                                     |id| library::playback_track(&library, id),
                                     |id, previous| {
-                                        library::playback_neighbor(&library, id, previous, liked)
+                                        library::playback_neighbor(&library, id, previous, liked, playlist_id.as_deref())
                                     },
                                 );
                                 }

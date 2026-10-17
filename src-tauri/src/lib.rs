@@ -18,6 +18,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             library::load_library,
+            library::playlist_control,
             library::set_track_favorite,
             library::select_music_folder,
             library::scan_music,

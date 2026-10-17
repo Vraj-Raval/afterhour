@@ -8,6 +8,7 @@
     "opener:default",
     "dialog:allow-open",
     "allow-load-library",
+    "allow-playlist-control",
     "allow-set-track-favorite",
     "allow-select-music-folder",
     "allow-scan-music",

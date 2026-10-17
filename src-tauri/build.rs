@@ -3,6 +3,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "greet",
             "load_library",
+            "playlist_control",
             "set_track_favorite",
             "select_music_folder",
             "scan_music",

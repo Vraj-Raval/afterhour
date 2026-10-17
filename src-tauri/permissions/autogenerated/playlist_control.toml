@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-playlist-control"
+description = "Enables the playlist_control command without any pre-configured scope."
+commands.allow = ["playlist_control"]
+
+[[permission]]
+identifier = "deny-playlist-control"
+description = "Denies the playlist_control command without any pre-configured scope."
+commands.deny = ["playlist_control"]

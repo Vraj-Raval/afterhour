@@ -236,6 +236,10 @@ fn resume_without_a_paused_source_reports_an_error() {
 fn command_payload_uses_track_ids_and_rejects_unknown_actions() {
     let action: Action = serde_json::from_str(r#"{"type":"play","trackId":"saved-id"}"#).unwrap();
     assert!(matches!(action, Action::Play {track_id} if track_id == "saved-id"));
+    let action: Action = serde_json::from_str(r#"{"type":"playPlaylist","trackId":"first","trackIds":["third","first"],"playlistId":"custom"}"#).unwrap();
+    assert!(
+        matches!(action, Action::PlayPlaylist {track_id,playlist_id,track_ids} if track_id=="first" && playlist_id=="custom" && track_ids==vec!["third","first"])
+    );
     let action: Action = serde_json::from_str(
         r#"{"type":"playCollection","trackId":"first","trackIds":["first","third"],"liked":true}"#,
     )
@@ -923,4 +927,457 @@ fn collection_context_survives_navigation_completion_boundaries_and_replay() {
         |id, previous| context_neighbor(id, previous, liked),
     );
     assert_eq!(t.state.track.as_ref().unwrap().id, "second");
+}
+
+#[test]
+fn playlist_context_navigates_in_custom_order_completes_and_preserves_other_contexts() {
+    let f = Fixture::new();
+    let mut t = Transport::new(FakeBackend::default());
+    let playlist = vec!["third".to_string(), "first".to_string()];
+    t.apply(
+        Action::PlayPlaylist {
+            track_id: "third".into(),
+            playlist_id: "custom".into(),
+            track_ids: playlist.clone(),
+        },
+        |id| resolve(&f, id),
+    );
+    assert_eq!(t.playlist_id(), Some("custom"));
+    let neighbors = |id: &str, previous: bool| -> Result<Option<String>, String> {
+        let index = playlist
+            .iter()
+            .position(|candidate| candidate == id)
+            .unwrap();
+        Ok(if previous {
+            index.checked_sub(1).map(|i| playlist[i].clone())
+        } else {
+            playlist.get(index + 1).cloned()
+        })
+    };
+    t.apply_with_navigation(
+        Action::Next {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        neighbors,
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "first");
+    t.apply_with_navigation(
+        Action::Previous {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        neighbors,
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "third");
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), neighbors);
+    assert_eq!(t.state.track.as_ref().unwrap().id, "first");
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), neighbors);
+    assert_eq!(t.state.status, Status::Stopped);
+    assert_eq!(t.playlist_id(), Some("custom"));
+    t.apply(
+        Action::Play {
+            track_id: "first".into(),
+        },
+        |id| resolve(&f, id),
+    );
+    assert_eq!(t.playlist_id(), Some("custom"));
+    t.apply(
+        Action::PlayPlaylist {
+            track_id: "missing".into(),
+            playlist_id: "other".into(),
+            track_ids: vec!["missing".into()],
+        },
+        |id| resolve(&f, id),
+    );
+    assert_eq!(t.playlist_id(), Some("custom"));
+    t.apply(
+        Action::PlayCollection {
+            track_id: "first".into(),
+            track_ids: vec!["first".into()],
+            liked: true,
+        },
+        |id| resolve(&f, id),
+    );
+    assert!(t.is_liked_collection());
+    assert_eq!(t.playlist_id(), None);
+    t.apply(
+        Action::PlayCollection {
+            track_id: "first".into(),
+            track_ids: vec!["first".into()],
+            liked: false,
+        },
+        |id| resolve(&f, id),
+    );
+    assert!(!t.is_liked_collection());
+    assert_eq!(t.playlist_id(), None);
+}
+
+fn enqueue(t: &mut Transport<FakeBackend>, f: &Fixture, id: &str, first: bool) {
+    let state = t.apply(
+        Action::Enqueue {
+            track_id: id.into(),
+            play_next: first,
+        },
+        |id| resolve(f, id),
+    );
+    assert!(state.error.is_none());
+}
+#[test]
+fn queue_edits_are_session_only_ordered_and_revision_guarded_without_starting_audio() {
+    let f = Fixture::new();
+    let mut t = Transport::new(FakeBackend::default());
+    enqueue(&mut t, &f, "first", false);
+    enqueue(&mut t, &f, "second", false);
+    enqueue(&mut t, &f, "third", true);
+    assert_eq!(t.backend.starts, 0);
+    assert_eq!(
+        t.state
+            .queue
+            .iter()
+            .map(|e| e.track.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["third", "first", "second"]
+    );
+    let entry = t.state.queue[2].id;
+    let revision = t.state.queue_revision;
+    t.apply(
+        Action::QueueMove {
+            entry_id: entry,
+            direction: -1,
+            queue_revision: revision,
+        },
+        |_| panic!(),
+    );
+    assert_eq!(t.state.queue[1].track.id, "second");
+    let stale = t.apply(
+        Action::QueueRemove {
+            entry_id: entry,
+            queue_revision: revision,
+        },
+        |_| panic!(),
+    );
+    assert!(stale.error.is_some());
+    assert_eq!(t.state.queue.len(), 3);
+    t.apply(
+        Action::QueueRemove {
+            entry_id: entry,
+            queue_revision: t.state.queue_revision,
+        },
+        |_| panic!(),
+    );
+    assert_eq!(t.state.queue.len(), 2);
+    enqueue(&mut t, &f, "first", false);
+    assert_ne!(
+        t.state.queue[1].id, t.state.queue[2].id,
+        "Repeated songs have distinct queue identities"
+    );
+    t.apply(
+        Action::QueueClear {
+            queue_revision: t.state.queue_revision,
+        },
+        |_| panic!(),
+    );
+    assert!(t.state.queue.is_empty());
+    assert_eq!(t.backend.starts, 0);
+}
+#[test]
+fn queued_tracks_override_then_resume_library_from_original_anchor() {
+    let f = Fixture::new();
+    let mut t = Transport::new(FakeBackend::default());
+    t.apply(
+        Action::Play {
+            track_id: "first".into(),
+        },
+        |id| resolve(&f, id),
+    );
+    enqueue(&mut t, &f, "extra", false);
+    enqueue(&mut t, &f, "other", false);
+    let source = t.state.source_id;
+    t.apply_with_navigation(
+        Action::Next { source_id: source },
+        |id| resolve(&f, id),
+        ordered,
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "extra");
+    let stale = t.apply_with_navigation(
+        Action::Next { source_id: source },
+        |id| resolve(&f, id),
+        ordered,
+    );
+    assert!(stale.error.is_some());
+    assert_eq!(t.state.queue.len(), 1);
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), ordered);
+    assert_eq!(t.state.track.as_ref().unwrap().id, "other");
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), ordered);
+    assert_eq!(t.state.track.as_ref().unwrap().id, "second");
+}
+#[test]
+fn queue_preserves_liked_and_playlist_context_and_collection_boundaries() {
+    for playlist in [false, true] {
+        let f = Fixture::new();
+        let mut t = Transport::new(FakeBackend::default());
+        let ids = vec!["third".into(), "first".into()];
+        let action = if playlist {
+            Action::PlayPlaylist {
+                track_id: "third".into(),
+                playlist_id: "custom".into(),
+                track_ids: ids,
+            }
+        } else {
+            Action::PlayCollection {
+                track_id: "third".into(),
+                track_ids: ids,
+                liked: true,
+            }
+        };
+        t.apply(action, |id| resolve(&f, id));
+        enqueue(&mut t, &f, "extra", false);
+        let neighbor = |id: &str, previous: bool| -> Result<Option<String>, String> {
+            assert!(!previous);
+            assert_eq!(id, "third");
+            Ok(Some("first".into()))
+        };
+        t.apply_with_navigation(
+            Action::Next {
+                source_id: t.state.source_id,
+            },
+            |id| resolve(&f, id),
+            neighbor,
+        );
+        assert_eq!(
+            t.playlist_id(),
+            if playlist { Some("custom") } else { None }
+        );
+        assert_eq!(t.is_liked_collection(), !playlist);
+        t.backend.event = Some(BackendEvent::Finished);
+        t.tick(|id| resolve(&f, id), neighbor);
+        assert_eq!(t.state.track.as_ref().unwrap().id, "first");
+        t.backend.event = Some(BackendEvent::Finished);
+        t.tick(|id| resolve(&f, id), |_, _| Ok(None));
+        assert_eq!(t.state.status, Status::Stopped);
+    }
+}
+#[test]
+fn previous_retraces_queue_and_clear_keeps_current_playing_then_resumes_collection() {
+    let f = Fixture::new();
+    let mut t = Transport::new(FakeBackend::default());
+    t.apply(
+        Action::Play {
+            track_id: "first".into(),
+        },
+        |id| resolve(&f, id),
+    );
+    enqueue(&mut t, &f, "extra", false);
+    t.apply_with_navigation(
+        Action::Next {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        ordered,
+    );
+    t.apply_with_navigation(
+        Action::Previous {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        ordered,
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "first");
+    assert_eq!(t.state.queue[0].track.id, "extra");
+    t.apply_with_navigation(
+        Action::Next {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        ordered,
+    );
+    enqueue(&mut t, &f, "other", false);
+    let starts = t.backend.starts;
+    t.apply_with_navigation(
+        Action::QueueClear {
+            queue_revision: t.state.queue_revision,
+        },
+        |id| resolve(&f, id),
+        ordered,
+    );
+    assert_eq!(t.state.status, Status::Playing);
+    assert_eq!(t.backend.starts, starts);
+    assert_eq!(t.state.track.as_ref().unwrap().id, "extra");
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), ordered);
+    assert_eq!(t.state.track.as_ref().unwrap().id, "second");
+}
+#[test]
+fn idle_queue_starts_only_explicitly_and_stops_when_exhausted() {
+    let f = Fixture::new();
+    let mut t = Transport::new(FakeBackend::default());
+    enqueue(&mut t, &f, "extra", true);
+    assert_eq!(t.state.status, Status::Stopped);
+    t.apply_with_navigation(
+        Action::Next { source_id: 0 },
+        |id| resolve(&f, id),
+        |_, _| panic!("No underlying context"),
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "extra");
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), |_, _| panic!("No underlying context"));
+    assert_eq!(t.state.status, Status::Stopped);
+}
+#[test]
+fn queue_edits_do_not_discard_completion_and_failed_entries_are_retained() {
+    let f = Fixture::new();
+    let mut t = Transport::new(FakeBackend::default());
+    t.apply(
+        Action::Play {
+            track_id: "first".into(),
+        },
+        |id| resolve(&f, id),
+    );
+    t.backend.event = Some(BackendEvent::Finished);
+    t.apply_with_navigation(
+        Action::Enqueue {
+            track_id: "extra".into(),
+            play_next: false,
+        },
+        |id| resolve(&f, id),
+        ordered,
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "extra");
+    enqueue(&mut t, &f, "later-missing", false);
+    let state = t.apply_with_navigation(
+        Action::Next {
+            source_id: t.state.source_id,
+        },
+        |_| Err("File disconnected".into()),
+        ordered,
+    );
+    assert!(state.error.is_some());
+    assert_eq!(state.status, Status::Playing);
+    assert_eq!(state.queue.len(), 1);
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|_| Err("File disconnected".into()), ordered);
+    assert_eq!(t.state.status, Status::Stopped);
+    assert_eq!(t.state.queue.len(), 1);
+}
+
+#[test]
+fn search_album_artist_selections_use_snapshot_order_previous_completion_and_queue_continuation() {
+    let f = Fixture::new();
+    let mut t = Transport::new(FakeBackend::default());
+    t.apply(
+        Action::PlaySelection {
+            track_id: "third".into(),
+            track_ids: vec!["third".into(), "first".into()],
+        },
+        |id| resolve(&f, id),
+    );
+    t.apply_with_navigation(
+        Action::Next {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        |_, _| panic!("Must not consult global library"),
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "first");
+    t.apply_with_navigation(
+        Action::Previous {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        |_, _| panic!(),
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "third");
+    enqueue(&mut t, &f, "extra", false);
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), |_, _| panic!());
+    assert_eq!(t.state.track.as_ref().unwrap().id, "extra");
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), |_, _| panic!());
+    assert_eq!(t.state.track.as_ref().unwrap().id, "first");
+    t.backend.event = Some(BackendEvent::Finished);
+    t.tick(|id| resolve(&f, id), |_, _| panic!());
+    assert_eq!(t.state.status, Status::Stopped);
+    t.apply(
+        Action::Play {
+            track_id: "first".into(),
+        },
+        |id| resolve(&f, id),
+    );
+    t.apply_with_navigation(
+        Action::Previous {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        |_, _| panic!(),
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "third");
+    t.apply(
+        Action::PlayCollection {
+            track_id: "first".into(),
+            track_ids: vec!["first".into(), "second".into()],
+            liked: false,
+        },
+        |id| resolve(&f, id),
+    );
+    t.apply_with_navigation(
+        Action::Next {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        ordered,
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "second");
+}
+#[test]
+fn failed_selection_does_not_replace_existing_context_or_consume_upcoming_queue() {
+    let f = Fixture::new();
+    let mut t = Transport::new(FakeBackend::default());
+    t.apply(
+        Action::PlayPlaylist {
+            track_id: "first".into(),
+            playlist_id: "custom".into(),
+            track_ids: vec!["first".into()],
+        },
+        |id| resolve(&f, id),
+    );
+    enqueue(&mut t, &f, "extra", false);
+    let state = t.apply(
+        Action::PlaySelection {
+            track_id: "missing".into(),
+            track_ids: vec!["missing".into()],
+        },
+        |id| resolve(&f, id),
+    );
+    assert!(state.error.is_some());
+    assert_eq!(t.playlist_id(), Some("custom"));
+    assert_eq!(state.queue.len(), 1);
+    let action: Action = serde_json::from_str(
+        r#"{"type":"playSelection","trackId":"third","trackIds":["third","first"]}"#,
+    )
+    .unwrap();
+    t.apply(action, |id| resolve(&f, id));
+    assert_eq!(t.playlist_id(), None);
+    assert!(!t.is_liked_collection());
+    assert_eq!(t.state.queue.len(), 1);
+    t.apply_with_navigation(
+        Action::Next {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        |_, _| panic!(),
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "extra");
+    t.apply_with_navigation(
+        Action::Next {
+            source_id: t.state.source_id,
+        },
+        |id| resolve(&f, id),
+        |_, _| panic!(),
+    );
+    assert_eq!(t.state.track.as_ref().unwrap().id, "first");
 }

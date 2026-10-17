@@ -30,7 +30,7 @@ test("heart exposes liked state and stops row propagation", async () => {
 test("Liked Songs filters actual view rows and reuses the playback callback", () => {
   const { MainContent } = component("MainContent", {
     react: { useMemo: fn => fn(), useDeferredValue: value => value },
-    "./TrackList": { TrackList: "tracks" }, "./PlayerIcon": { PlayerIcon: "icon" },
+    "./CollectionHeader": { CollectionHeader:"header" }, "./TrackList": { TrackList: "tracks" }, "./PlayerIcon": { PlayerIcon: "icon" },
   });
   const tracks = [track, { ...track, id: "two", favorite: false }];
   const calls = [];
