@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-music-folder"
+description = "Enables the select_music_folder command without any pre-configured scope."
+commands.allow = ["select_music_folder"]
+
+[[permission]]
+identifier = "deny-select-music-folder"
+description = "Denies the select_music_folder command without any pre-configured scope."
+commands.deny = ["select_music_folder"]

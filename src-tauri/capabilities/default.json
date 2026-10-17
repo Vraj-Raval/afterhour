@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "dialog:allow-open",
+    "allow-load-library",
+    "allow-set-track-favorite",
+    "allow-select-music-folder",
+    "allow-scan-music",
+    "allow-cancel-music-scan",
+    "allow-get-music-artwork",
+    "allow-playback-control"
+  ]
+}
